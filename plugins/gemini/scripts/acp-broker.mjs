@@ -85,7 +85,9 @@ function spawnAcpProcess(cwd) {
   const child = spawn("gemini", ["--acp"], {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
-    env: process.env
+    env: process.env,
+    shell: process.platform === "win32",
+    windowsHide: true
   });
 
   const rl = readline.createInterface({ input: child.stdout });

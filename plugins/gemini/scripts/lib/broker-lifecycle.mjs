@@ -143,6 +143,7 @@ export async function ensureBrokerSession(cwd, options = {}) {
   ], {
     cwd,
     detached: true,
+    windowsHide: true,
     stdio: ["ignore", "ignore", "ignore"],
     env: {
       ...options.env ?? process.env,

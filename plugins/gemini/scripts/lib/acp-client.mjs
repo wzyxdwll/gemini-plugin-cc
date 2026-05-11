@@ -92,7 +92,21 @@ class AcpClientBase {
       if (pending) {
         this.pending.delete(message.id);
         if (message.error) {
-          pending.reject(message.error);
+          // CCG P-9 patch: wrap JSON-RPC error object in Error instance.
+          // Without this, callers doing `e instanceof Error ? e.message : String(e)`
+          // get "[object Object]" — losing real error info (auth-expired, broker-dead,
+          // parse-error, etc). See .ccg-migration/PLUGIN-PATCHES.md P-9.
+          const _err = message.error;
+          const _wrapped = Object.assign(
+            new Error(typeof _err === "object" && _err !== null && _err.message
+              ? String(_err.message)
+              : String(_err)),
+            {
+              jsonrpcCode: typeof _err === "object" && _err !== null ? _err.code : undefined,
+              jsonrpcData: typeof _err === "object" && _err !== null ? _err.data : undefined,
+            },
+          );
+          pending.reject(_wrapped);
         } else {
           pending.resolve(message.result);
         }
@@ -243,7 +257,9 @@ class SpawnedAcpClient extends AcpClientBase {
     this.proc = spawn("gemini", ["--acp"], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: process.platform === "win32",
+      windowsHide: true
     });
 
     const rl = readline.createInterface({ input: this.proc.stdout });

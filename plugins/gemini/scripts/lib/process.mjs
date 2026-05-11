@@ -21,7 +21,8 @@ export function runCommand(command, args, options = {}) {
       maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
       encoding: "utf8",
       env: options.env ?? process.env,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
     });
     return {
       stdout: result.stdout ?? "",
@@ -101,7 +102,7 @@ export function terminateProcessTree(pid) {
 
   try {
     if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
     } else {
       // Try SIGTERM on the process group first.
       try {
@@ -144,6 +145,7 @@ export function spawnDetached(command, args, options = {}) {
       cwd: options.cwd,
       env: options.env ?? process.env,
       detached: true,
+    windowsHide: true,
       stdio
     });
 

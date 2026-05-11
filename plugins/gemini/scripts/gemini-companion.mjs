@@ -63,6 +63,22 @@ import {
 import { THINKING_LEVELS } from "./lib/thinking.mjs";
 import { createStreamHandler } from "./lib/stream-output.mjs";
 
+// CCG P-12 patch: prevent CLAUDE_PLUGIN_DATA cross-contamination from previous
+// plugin invocations (e.g., codex). Recompute from this script's physical path
+// so the broker session file lands in our own data dir, enabling broker reuse.
+// See .ccg-migration/PLUGIN-PATCHES.md P-12.
+{
+  const _scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const _versionDir = path.dirname(_scriptDir);
+  const _pluginDir = path.dirname(_versionDir);
+  const _marketplaceDir = path.dirname(_pluginDir);
+  const _cacheDir = path.dirname(_marketplaceDir);
+  const _pluginsDir = path.dirname(_cacheDir);
+  const _pluginName = path.basename(_pluginDir);
+  const _marketplaceName = path.basename(_marketplaceDir);
+  process.env.CLAUDE_PLUGIN_DATA = path.join(_pluginsDir, "data", _pluginName + "-" + _marketplaceName);
+}
+
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
@@ -701,6 +717,7 @@ function spawnBackgroundWorker(workspaceRoot, jobId) {
   const child = spawn("node", [scriptPath, "task-worker", jobId], {
     cwd: workspaceRoot,
     detached: true,
+    windowsHide: true,
     stdio: ["ignore", "ignore", "ignore"],
     env: process.env
   });
