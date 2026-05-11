@@ -20,7 +20,17 @@ function sanitizePipeName(value) {
  */
 export function createBrokerEndpoint(sessionDir, platform = process.platform) {
   if (platform === "win32") {
-    const pipeName = sanitizePipeName(`${path.win32.basename(sessionDir)}-gemini-acp`);
+    // CCG P-19: pipe name must include a workspace-unique identifier.
+    // Previously we used basename(sessionDir), but sessionDir always ends
+    // in the constant "acp-session" (broker-lifecycle.mjs SESSION_DIR_NAME),
+    // so all workspaces collided on \\.\pipe\acp-session-gemini-acp.
+    // The parent directory of sessionDir is the workspace state dir
+    // "<slug>-<hash>" computed in state.mjs, which is per-workspace unique.
+    const normalizedSessionDir = path.win32.normalize(sessionDir);
+    const workspaceKey =
+      path.win32.basename(path.win32.dirname(normalizedSessionDir)) ||
+      path.win32.basename(normalizedSessionDir);
+    const pipeName = sanitizePipeName(`${workspaceKey}-gemini-acp`);
     return `pipe:\\\\.\\pipe\\${pipeName}`;
   }
 

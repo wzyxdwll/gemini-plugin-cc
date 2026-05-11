@@ -55,6 +55,69 @@ function waitForBrokerEndpoint(endpoint, timeoutMs) {
   });
 }
 
+/**
+ * CCG P-21: probe broker/ready RPC to verify the ACP child has actually
+ * completed its initialize handshake. waitForBrokerEndpoint only verifies
+ * that the socket is accepting connections, which happens before broker→ACP
+ * initialize finishes — a client connecting at that point would hit "ACP
+ * process is not ready" or queue (P-10).
+ *
+ * @param {string} endpoint
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>}
+ */
+function waitForBrokerReady(endpoint, timeoutMs) {
+  return new Promise((resolve) => {
+    const target = parseBrokerEndpoint(endpoint);
+    const deadline = Date.now() + timeoutMs;
+
+    function probe() {
+      if (Date.now() > deadline) {
+        resolve(false);
+        return;
+      }
+
+      const socket = net.createConnection({ path: target.path });
+      let buffer = "";
+      const timer = setTimeout(() => {
+        socket.destroy();
+        setTimeout(probe, 100);
+      }, 500);
+
+      socket.on("connect", () => {
+        socket.write(
+          `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "broker/ready", params: {} })}\n`,
+        );
+      });
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        const newlineIdx = buffer.indexOf("\n");
+        if (newlineIdx === -1) return;
+        clearTimeout(timer);
+        const line = buffer.slice(0, newlineIdx);
+        socket.end();
+        try {
+          const response = JSON.parse(line);
+          if (response?.result?.ready === true) {
+            resolve(true);
+            return;
+          }
+        } catch {
+          // fall through to retry
+        }
+        setTimeout(probe, 100);
+      });
+      socket.on("error", () => {
+        clearTimeout(timer);
+        socket.destroy();
+        setTimeout(probe, 100);
+      });
+    }
+
+    probe();
+  });
+}
+
 function resolveSessionDir(cwd) {
   return path.join(resolveStateDir(cwd), SESSION_DIR_NAME);
 }
@@ -134,27 +197,43 @@ export async function ensureBrokerSession(cwd, options = {}) {
   const pidFile = path.join(sessionDir, "broker.pid");
   const logFile = path.join(sessionDir, "broker.log");
 
-  const child = spawn("node", [
-    BROKER_SCRIPT,
-    "serve",
-    "--endpoint", endpoint,
-    "--cwd", cwd,
-    "--pid-file", pidFile
-  ], {
-    cwd,
-    detached: true,
-    windowsHide: true,
-    stdio: ["ignore", "ignore", "ignore"],
-    env: {
-      ...options.env ?? process.env,
-      [PID_FILE_ENV]: pidFile,
-      [LOG_FILE_ENV]: logFile
-    }
-  });
+  // CCG I1: route broker stdout/stderr into broker.log so daemon crashes,
+  // initialize failures, and idle-timer / cancel diagnostics are recoverable
+  // post-mortem. Previously stdio was ["ignore","ignore","ignore"] and the
+  // LOG_FILE_ENV path was advertised but never written. fd is duplicated
+  // into the detached child on spawn — we can (and must) close our handle
+  // immediately so the parent process doesn't keep the file open.
+  const logFd = fs.openSync(logFile, "a", 0o600);
+  let child;
+  try {
+    child = spawn("node", [
+      BROKER_SCRIPT,
+      "serve",
+      "--endpoint", endpoint,
+      "--cwd", cwd,
+      "--pid-file", pidFile
+    ], {
+      cwd,
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", logFd, logFd],
+      env: {
+        ...options.env ?? process.env,
+        [PID_FILE_ENV]: pidFile,
+        [LOG_FILE_ENV]: logFile
+      }
+    });
+  } finally {
+    fs.closeSync(logFd);
+  }
 
   child.unref();
 
-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
+  // CCG P-21: use waitForBrokerReady (broker/ready RPC probe) instead of
+  // just checking that the socket is accepting connections. This ensures
+  // the ACP child has finished initialize before we tell the caller the
+  // broker is usable.
+  const ready = await waitForBrokerReady(endpoint, options.timeoutMs ?? 5000);
   if (!ready) {
     teardownBrokerSession({
       endpoint,

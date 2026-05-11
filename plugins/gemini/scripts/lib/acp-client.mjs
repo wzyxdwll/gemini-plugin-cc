@@ -234,6 +234,12 @@ class AcpClientBase {
           /** @type {any} */ (err).timeout = true;
           /** @type {any} */ (err).method = method;
           reject(err);
+          // CCG P-20: a timed-out request means the broker/ACP is unresponsive.
+          // Forcibly close the transport so the broker observes the disconnect
+          // and runs its cleanup path (cancel + pendingRequests clear). Without
+          // this, the broker keeps the active prompt running and routes future
+          // session/update notifications to whoever takes activeClient next.
+          this.abortTransport(err);
         }, timeoutMs);
         if (typeof timer.unref === "function") timer.unref();
       }
@@ -292,6 +298,15 @@ class AcpClientBase {
 
   async close() {
     throw new Error("close must be implemented by subclasses.");
+  }
+
+  // CCG P-20: forcibly tear down the transport (socket / spawned child).
+  // Subclasses override; the default falls back to close() which is the
+  // graceful path. The fire-and-forget catch is intentional — we are
+  // already failing the caller via reject, so a secondary teardown error
+  // would be redundant noise.
+  abortTransport(_error) {
+    void this.close().catch(() => {});
   }
 
   handleExit(error) {
@@ -436,6 +451,21 @@ class BrokerAcpClient extends AcpClientBase {
       this.socket.end();
     }
     await this.exitPromise;
+  }
+
+  // CCG P-20: forcibly destroy the socket so the broker sees a hard close
+  // immediately and runs cleanupClientSocket (cancel + pendingRequests clear).
+  // Bypasses the graceful end() handshake of close() because the broker
+  // would otherwise have no reason to abandon the in-flight prompt.
+  abortTransport(error) {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    if (this.socket && !this.socket.destroyed) {
+      this.socket.destroy(error instanceof Error ? error : undefined);
+    }
+    this.handleExit(error instanceof Error ? error : null);
   }
 
   sendMessage(message) {

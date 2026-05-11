@@ -75,11 +75,18 @@ let acpProcess = null;
 let acpReady = false;
 let nextRpcId = 1;
 
-/** @type {Map<number, { clientSocket: net.Socket, clientId: number }>} */
+/**
+ * @type {Map<number, { clientSocket: net.Socket | null, clientId: number | null, method?: string, sessionId?: string | null }>}
+ */
 const pendingRequests = new Map();
 
 /** @type {net.Socket | null} */
 let activeClient = null;
+
+// CCG P-20: track the sessionId of the prompt currently being forwarded so
+// that if the active client drops we can cancel the right ACP session.
+/** @type {string | null} */
+let activeSessionId = null;
 
 // CCG P-14: broker idle watchdog. The broker daemon is detached + unref'd
 // (broker-lifecycle.mjs spawn options) and has no self-shutdown — without
@@ -163,21 +170,26 @@ function spawnAcpProcess(cwd) {
   acpProcess = child;
 
   // Send initialize handshake.
+  // CCG P-21: must include protocolVersion (ACP schema requires `number`).
+  // gemini-cli ≥0.39 rejects initialize without it with -32603 "Internal
+  // error" / "expected number, received undefined" — broker would then sit
+  // forever with acpReady=false.
+  // Register the pending entry BEFORE sendToAcp so a synchronous-fast response
+  // can't arrive before we record where to route it.
   const initId = nextRpcId++;
+  pendingRequests.set(initId, { clientSocket: null, clientId: null });
   sendToAcp({
     jsonrpc: "2.0",
     id: initId,
     method: "initialize",
     params: {
+      protocolVersion: 1,
       clientInfo: {
         name: "gemini-plugin-cc-broker",
         version: "1.0.0"
       }
     }
   });
-
-  // The first response will be the initialize result.
-  pendingRequests.set(initId, { clientSocket: null, clientId: null });
 
   return child;
 }
@@ -209,7 +221,22 @@ function handleAcpLine(line) {
       pendingRequests.delete(message.id);
 
       if (pending.clientSocket === null) {
-        // Initialize response — mark as ready.
+        // Initialize response.
+        // CCG P-21: an error response must NOT mark broker as ready —
+        // previously acpReady was set unconditionally, so a failed handshake
+        // (auth, protocol mismatch, etc.) would leave the broker accepting
+        // client requests against a dead ACP channel. On failure, log and
+        // shut down so the next companion call respawns cleanly.
+        if (message.error) {
+          acpReady = false;
+          const reason =
+            message.error?.message ?? JSON.stringify(message.error);
+          process.stderr.write(
+            `ACP broker: gemini --acp initialize failed: ${reason}\n`,
+          );
+          shutdown();
+          return;
+        }
         acpReady = true;
         process.stderr.write("ACP broker: gemini --acp initialized.\n");
         return;
@@ -229,6 +256,7 @@ function handleAcpLine(line) {
       );
       if (!hasMore && pending.clientSocket === activeClient) {
         activeClient = null;
+        activeSessionId = null; // CCG P-20: don't leak stale sessionId
         startIdleTimer(); // CCG P-14: nothing active, start idle countdown
       }
     }
@@ -278,25 +306,44 @@ function handleClientConnection(socket) {
     }
   });
 
-  socket.on("error", () => {
-    // Clean up any pending requests for this socket.
-    for (const [id, pending] of pendingRequests) {
-      if (pending.clientSocket === socket) {
-        pendingRequests.delete(id);
-      }
-    }
-    if (activeClient === socket) {
-      activeClient = null;
-      startIdleTimer(); // CCG P-14
-    }
-  });
+  socket.on("error", () => cleanupClientSocket(socket));
+  socket.on("close", () => cleanupClientSocket(socket));
+}
 
-  socket.on("close", () => {
-    if (activeClient === socket) {
-      activeClient = null;
-      startIdleTimer(); // CCG P-14
+// CCG P-20: unified cleanup for client error / close events. Previously
+// error and close handlers were asymmetric (error cleared pendingRequests
+// but close did not), and neither told ACP to cancel the in-flight prompt
+// — so a client timeout would leave session/update notifications routing
+// to whoever next took activeClient and the eventual response with no
+// home in pendingRequests. Idempotent: safe to call from both events.
+function cleanupClientSocket(socket) {
+  const owned = [...pendingRequests.values()].filter(
+    (p) => p.clientSocket === socket,
+  );
+  // If this socket owned the active prompt, tell ACP to abandon it.
+  // Without this the gemini --acp child keeps streaming tokens at us
+  // until completion, wasting tokens and confusing routing.
+  if (owned.length > 0 && activeClient === socket && acpProcess && acpReady) {
+    const promptEntry = owned.find((p) => p.method === "session/prompt");
+    const sessionId = promptEntry?.sessionId ?? activeSessionId;
+    sendToAcp({
+      jsonrpc: "2.0",
+      method: "session/cancel",
+      params: sessionId ? { sessionId } : {},
+    });
+  }
+
+  for (const [id, pending] of pendingRequests) {
+    if (pending.clientSocket === socket) {
+      pendingRequests.delete(id);
     }
-  });
+  }
+
+  if (activeClient === socket) {
+    activeClient = null;
+    activeSessionId = null;
+    startIdleTimer(); // CCG P-14
+  }
 }
 
 function handleClientMessage(socket, line) {
@@ -320,6 +367,20 @@ function handleClientMessage(socket, line) {
       result: { ok: true }
     });
     shutdown();
+    return;
+  }
+
+  // CCG P-21: broker/ready probe — lets ensureBrokerSession in broker-lifecycle
+  // distinguish "TCP socket is up" from "ACP child has finished initialize".
+  // Without this, lifecycle returned as soon as listen() succeeded, but the
+  // first client request could hit "ACP process is not ready" or fall into
+  // pendingQueue while broker→ACP initialize was still in flight.
+  if (message.method === "broker/ready") {
+    send(socket, {
+      jsonrpc: "2.0",
+      id: message.id ?? null,
+      result: { ready: Boolean(acpProcess && acpReady) }
+    });
     return;
   }
 
@@ -381,14 +442,32 @@ function handleClientMessage(socket, line) {
     }
     cancelIdleTimer(); // CCG P-14: broker has work, cancel idle countdown
   }
+  // CCG P-20: record the sessionId of the active prompt so that on abnormal
+  // client disconnect we can issue session/cancel to ACP with the right id.
+  // Interrupt RPCs (session/cancel) carry a sessionId too but must not
+  // overwrite the active one — they target it, they don't become it.
+  const params = message.params ?? {};
+  const sessionIdFromParams =
+    typeof params.sessionId === "string" && params.sessionId.length > 0
+      ? params.sessionId
+      : null;
+  if (!isInterruptMethod && sessionIdFromParams) {
+    activeSessionId = sessionIdFromParams;
+  }
+
   const brokerId = nextRpcId++;
-  pendingRequests.set(brokerId, { clientSocket: socket, clientId: message.id });
+  pendingRequests.set(brokerId, {
+    clientSocket: socket,
+    clientId: message.id ?? null,
+    method: message.method,
+    sessionId: sessionIdFromParams,
+  });
 
   sendToAcp({
     jsonrpc: "2.0",
     id: brokerId,
     method: message.method,
-    params: message.params ?? {}
+    params
   });
 }
 
