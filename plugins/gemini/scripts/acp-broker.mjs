@@ -25,6 +25,7 @@ import {
   buildBrokerDiagnosticNotification,
   sanitizeDiagnosticMessage
 } from "./lib/acp-diagnostics.mjs";
+import { buildGeminiAcpArgs } from "./lib/acp-args.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 import { listenOnRestrictedUnixSocket } from "./lib/socket-permissions.mjs";
 import { spawn } from "node:child_process";
@@ -122,7 +123,7 @@ function cancelIdleTimer() {
 }
 
 function spawnAcpProcess(cwd) {
-  const child = spawn("gemini", ["--acp"], {
+  const child = spawn("gemini", buildGeminiAcpArgs(process.env), {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,

@@ -18,6 +18,7 @@ import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
+import { buildGeminiAcpArgs } from "./acp-args.mjs";
 import { attachStderrDiagnosticCollector, BROKER_DIAGNOSTIC_METHOD, sanitizeDiagnosticMessage } from "./acp-diagnostics.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
@@ -338,9 +339,10 @@ class SpawnedAcpClient extends AcpClientBase {
   }
 
   async initialize() {
-    this.proc = spawn("gemini", ["--acp"], {
+    const env = this.options.env ?? process.env;
+    this.proc = spawn("gemini", buildGeminiAcpArgs(env), {
       cwd: this.cwd,
-      env: this.options.env ?? process.env,
+      env,
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32",
       windowsHide: true
