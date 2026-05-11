@@ -59,10 +59,18 @@
  *   }
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 
 const NO_MCP_SENTINEL = "__ccgx_no_mcp__";
+
+// Defaults are wide on purpose. gemini-batch is a one-shot wrapper around a
+// CLI that internally calls a foundation model — token-stream latency, auth
+// refresh, retry storms, and Windows MCP cold-start all eat seconds without
+// the process actually being stuck. We use idle (no output for N ms) as the
+// primary "stuck" signal and wall-time only as the absolute safety ceiling.
+const DEFAULT_TIMEOUT_MS = 7_200_000;        // 2h
+const DEFAULT_IDLE_TIMEOUT_MS = 600_000;     // 10min
 
 function parseArgs(argv) {
   const opts = {
@@ -73,6 +81,8 @@ function parseArgs(argv) {
     model: null,
     cwd: null,
     allowMcp: false,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
   };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -107,6 +117,22 @@ function parseArgs(argv) {
       case "--allow-mcp":
         opts.allowMcp = true;
         break;
+      case "--timeout-ms": {
+        const v = Number.parseInt(consumeValue(), 10);
+        if (!Number.isFinite(v) || v < 0) {
+          throw new Error("--timeout-ms requires a non-negative integer (0 = disable)");
+        }
+        opts.timeoutMs = v;
+        break;
+      }
+      case "--idle-timeout-ms": {
+        const v = Number.parseInt(consumeValue(), 10);
+        if (!Number.isFinite(v) || v < 0) {
+          throw new Error("--idle-timeout-ms requires a non-negative integer (0 = disable)");
+        }
+        opts.idleTimeoutMs = v;
+        break;
+      }
       // Companion-compat no-ops:
       case "--background":
       case "--wait":
@@ -145,6 +171,41 @@ function emitError(message, durationMs = 0) {
     error: message,
   });
   process.exit(1);
+}
+
+/**
+ * Best-effort kill of the child + entire descendant tree.
+ *
+ * Why a tree kill: on Windows we spawn with `shell: true`, so the child is
+ * `cmd.exe` and `gemini` (the npm shim → `node gemini.js`) is a grandchild.
+ * Sending SIGTERM to the direct child terminates only `cmd.exe` and leaves
+ * the real gemini-cli node process running — orphaned, still holding the
+ * model session, and accumulating arbitrary cost. `taskkill /T /F` walks
+ * the descendant tree by ParentProcessId and force-kills each.
+ *
+ * On POSIX SIGTERM propagates via process group when we use the same
+ * lineage; the `kill -- -pgid` path would be needed for true tree kill,
+ * but `shell:true` is win32-only here so the POSIX path keeps SIGTERM.
+ */
+function killProcessTree(child) {
+  if (!child?.pid) return;
+  if (process.platform === "win32") {
+    // /T: include descendants. /F: force. spawnSync so we don't race the
+    // exit handler. windowsHide keeps the console flicker-free.
+    try {
+      spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+    } catch {
+      // Fall through to SIGKILL — at least the direct child dies.
+    }
+  }
+  try { child.kill("SIGTERM"); } catch { /* ignore */ }
+  // SIGKILL backstop in case SIGTERM is ignored (cmd.exe sometimes does).
+  setTimeout(() => {
+    try { child.kill("SIGKILL"); } catch { /* ignore */ }
+  }, 5000).unref?.();
 }
 
 /**
@@ -209,18 +270,46 @@ async function main() {
 
   let stdoutBuf = "";
   let stderrBuf = "";
+  let lastActivityAt = Date.now();
   child.stdout.setEncoding("utf-8");
   child.stderr.setEncoding("utf-8");
   child.stdout.on("data", (chunk) => {
     stdoutBuf += chunk;
+    lastActivityAt = Date.now();
   });
   child.stderr.on("data", (chunk) => {
     stderrBuf += chunk;
+    lastActivityAt = Date.now();
   });
 
   // Pipe the prompt body in over stdin then close it so gemini-cli sees EOF
   // and enters single-turn mode.
   child.stdin.end(opts.prompt);
+
+  // Two-layer kill: idle (silence) is the primary "stuck" detector; wall-time
+  // is the absolute safety ceiling. Either fires → killProcessTree → the
+  // exit Promise resolves naturally and we report the cause.
+  let killed = false;
+  let killReason = null;
+  const triggerKill = (reason) => {
+    if (killed) return;
+    killed = true;
+    killReason = reason;
+    killProcessTree(child);
+  };
+  const wallTimer = opts.timeoutMs > 0
+    ? setTimeout(() => triggerKill(`wall-time ${opts.timeoutMs}ms`), opts.timeoutMs)
+    : null;
+  const idleChecker = opts.idleTimeoutMs > 0
+    ? setInterval(() => {
+        const silent = Date.now() - lastActivityAt;
+        if (silent >= opts.idleTimeoutMs) {
+          triggerKill(`idle ${silent}ms exceeds ${opts.idleTimeoutMs}ms`);
+        }
+      }, 30000)
+    : null;
+  idleChecker?.unref?.();
+  wallTimer?.unref?.();
 
   const exit = await new Promise((resolve) => {
     child.once("exit", (code, signal) => resolve({ code, signal }));
@@ -229,7 +318,18 @@ async function main() {
     );
   });
 
+  if (wallTimer) clearTimeout(wallTimer);
+  if (idleChecker) clearInterval(idleChecker);
   const durationMs = Date.now() - startedAt;
+
+  if (killed) {
+    const tail = stderrBuf.length > 800 ? stderrBuf.slice(-800) : stderrBuf;
+    emitError(
+      `gemini-cli killed (${killReason})` + (tail ? `: ${tail.trim()}` : ""),
+      durationMs,
+    );
+    return;
+  }
 
   if (exit.code !== 0) {
     const tail = stderrBuf.length > 800 ? stderrBuf.slice(-800) : stderrBuf;

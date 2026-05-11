@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-05-12
+
+### Added
+
+- **`gemini-batch.mjs` 自洽 idle + wall-time 超时**。两层 timer 替代之前的"永等"行为：
+  - `--idle-timeout-ms <N>`（默认 600000ms = 10min）：监控 stdout/stderr 任何 chunk，N ms 内零输出 → 判定 hung → 杀整棵进程树。这是健康长任务（持续产 progress）vs 真死锁（沉默）的分界。
+  - `--timeout-ms <N>`（默认 7200000ms = 2h）：总 wall-time 兜底安全网。
+  - 任一传 `0` 禁用对应检测。
+- **Windows 进程树 kill** (`killProcessTree`)。`shell:true` spawn 产生 `cmd.exe → gemini.cmd → node gemini.js` 三层链，SIGTERM 单杀只死最顶层 cmd.exe，下游孤立残留。新增 `taskkill /T /F /PID <pid>` 走整棵子树，POSIX 仍走 SIGTERM（fall-through）。
+
+### Why
+
+调用者（如 ccg-workflow 的 `ccgx-call-plugin.mjs`）外层 SIGTERM 只能砸到 gemini-batch 直接子，导致 gemini-cli + cmd.exe shim 残留为孤儿。让 gemini-batch 自己在 idle/wall 触发时 `taskkill /T` 是把进程树管理收到这一层最干净。
+
 ## [1.1.0] - 2026-05-12
 
 ### Added
