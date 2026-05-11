@@ -24,7 +24,10 @@ export function createBrokerEndpoint(sessionDir, platform = process.platform) {
     return `pipe:\\\\.\\pipe\\${pipeName}`;
   }
 
-  return `unix:${path.join(sessionDir, "broker.sock")}`;
+  // Unix socket endpoint must use POSIX separators even when this code runs
+  // on Windows (e.g. cross-platform tests), since the endpoint is consumed
+  // by a POSIX target. path.join would emit backslashes on Windows.
+  return `unix:${path.posix.join(sessionDir, "broker.sock")}`;
 }
 
 /**

@@ -1,0 +1,27 @@
+# Force LF line endings for files whose content is consumed by line-sensitive
+# tooling (docs tests, JSON-RPC line framing, regex assertions matching `\n`).
+# Without this, Windows users with `git config --global core.autocrlf=true`
+# get CRLF on checkout and tests/docs-agreement.test.mjs:53 fails because
+# its regex expects `\n` literals.
+
+*.md         text eol=lf
+*.mjs        text eol=lf
+*.js         text eol=lf
+*.json       text eol=lf
+*.ts         text eol=lf
+*.d.ts       text eol=lf
+
+# Shell scripts must be LF or Linux will refuse to execute them.
+*.sh         text eol=lf
+
+# Lockfiles stay LF regardless of platform.
+package-lock.json   text eol=lf
+pnpm-lock.yaml      text eol=lf
+
+# Binary — never normalize.
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.gif        binary
+*.ico        binary
+*.zip        binary

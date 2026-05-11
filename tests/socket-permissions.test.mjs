@@ -8,7 +8,11 @@ import process from "node:process";
 
 import { listenOnRestrictedUnixSocket } from "../plugins/gemini/scripts/lib/socket-permissions.mjs";
 
-test("listenOnRestrictedUnixSocket sets restrictive umask only while listening", () => {
+test("listenOnRestrictedUnixSocket sets restrictive umask only while listening", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX-only: process.umask() is meaningless on Windows (always returns 0)");
+    return;
+  }
   const originalUmask = process.umask();
   let observedUmaskDuringListen = null;
   let observedPath = null;
