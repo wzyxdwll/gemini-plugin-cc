@@ -306,7 +306,21 @@ async function spawnAndPublishBroker(cwd, sessionDir, options) {
   // just checking that the socket is accepting connections. This ensures
   // the ACP child has finished initialize before we tell the caller the
   // broker is usable.
-  const ready = await waitForBrokerReady(endpoint, options.timeoutMs ?? 5000);
+  //
+  // Default 30s grace because gemini-cli's `--acp` mode synchronously
+  // connects to every MCP server configured in ~/.gemini/settings.json
+  // before responding to `initialize` — 5 typical MCP servers take 5-15s
+  // to handshake, and a misconfigured one (e.g. MCP_DOCKER with no Docker
+  // daemon) can extend that to 60s+ before gemini-cli gives up on it.
+  // Under 30s, ensureBrokerSession was returning null and the caller's
+  // GeminiAcpClient.connect was silently falling back to SpawnedAcpClient,
+  // which then spawned a second gemini --acp child that ALSO had to wait
+  // for the same MCP server handshakes — doubling the wall time.
+  // Override via BROKER_STARTUP_TIMEOUT_MS env.
+  const startupTimeoutMs = Number(process.env.BROKER_STARTUP_TIMEOUT_MS)
+    || options.timeoutMs
+    || 30_000;
+  const ready = await waitForBrokerReady(endpoint, startupTimeoutMs);
   if (!ready) {
     // CCG: preserve broker.log + sessionDir on spawn failure so the user
     // can diagnose why broker→ACP initialize never completed (auth, network,
