@@ -31,13 +31,22 @@ Steps 1–2 run in your **terminal**. Steps 3–4 run **inside a Claude Code ses
 ### 1. Add the marketplace (terminal)
 
 ```bash
-claude plugin marketplace add sakibsadmanshajib/gemini-plugin-cc
+# ccgx fork (this repo):
+claude plugin marketplace add wzyxdwll/gemini-plugin-cc
+# or local checkout for dev:
+# claude plugin marketplace add D:/workflow/gemini-plugin-cc/
+
+# Upstream baseline (no CCG patches):
+# claude plugin marketplace add sakibsadmanshajib/gemini-plugin-cc
 ```
 
 ### 2. Install the plugin (terminal)
 
 ```bash
-claude plugin install gemini@google-gemini
+# ccgx fork:
+claude plugin install gemini@gemini-ccgx
+# Upstream baseline:
+# claude plugin install gemini@google-gemini
 ```
 
 ### 3. Reload plugins (inside Claude Code)

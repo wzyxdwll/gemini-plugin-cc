@@ -1,19 +1,19 @@
 {
-  "name": "google-gemini",
+  "name": "gemini-ccgx",
   "owner": {
-    "name": "Sakib Sadman Shajib"
+    "name": "wzy (ccgx fork — based on sakibsadmanshajib/gemini-plugin-cc)"
   },
   "metadata": {
-    "description": "Gemini plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.1"
+    "description": "ccgx-maintained fork of gemini-plugin-cc with P-1..P-21 + W1/W2/I1 patches for Windows pipe isolation, ACP timeouts, broker idle/cleanup, interrupt passthrough, and observability.",
+    "version": "1.0.1-ccgx"
   },
   "plugins": [
     {
       "name": "gemini",
-      "description": "Use Gemini from Claude Code to review code or delegate tasks.",
-      "version": "1.0.1",
+      "description": "Use Gemini from Claude Code to review code or delegate tasks (ccgx-patched fork).",
+      "version": "1.0.1-ccgx",
       "author": {
-        "name": "Sakib Sadman Shajib"
+        "name": "wzy / ccgx (forked from Sakib Sadman Shajib)"
       },
       "source": "./plugins/gemini"
     }
