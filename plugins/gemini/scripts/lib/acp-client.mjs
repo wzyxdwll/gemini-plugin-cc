@@ -25,11 +25,44 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 
 export const BROKER_ENDPOINT_ENV = "GEMINI_COMPANION_ACP_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
+export const REQUEST_TIMEOUT_RPC_CODE = -32008;
 
 // Maximum retained size (in characters) of the in-progress line buffer. Guards
 // against memory growth from a peer that never emits a newline. Full ACP
 // messages are line-delimited and normally well under 1 MiB.
 export const ACP_MAX_LINE_BUFFER = 1 << 20;
+
+/**
+ * CCG P-15 / P-18: per-method request timeouts. ACP is line-delimited
+ * request/response over stdio with no protocol-level timeout — if the server
+ * hangs (during handshake, after spawning gemini CLI, mid-LLM-call, etc.),
+ * the caller would otherwise wait forever. We attach a client-side timer to
+ * every pending request and split into two classes:
+ *
+ *   - STREAMING_METHODS: long-running RPCs that legitimately take minutes
+ *     (LLM completion). Default 30 min, override via ACP_STREAMING_TIMEOUT_MS.
+ *   - all others (handshake, session/new, session/cancel, broker/shutdown):
+ *     default 5 min, override via ACP_REQUEST_TIMEOUT_MS. These should never
+ *     take more than seconds; if they do, the broker / CLI is hung.
+ *
+ * 0 (or non-numeric env value) disables the timeout for that bucket.
+ */
+const STREAMING_METHODS = new Set(["session/prompt"]);
+
+function parseTimeoutEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
+function timeoutForMethod(method) {
+  if (STREAMING_METHODS.has(method)) {
+    return parseTimeoutEnv("ACP_STREAMING_TIMEOUT_MS", 30 * 60 * 1000);
+  }
+  return parseTimeoutEnv("ACP_REQUEST_TIMEOUT_MS", 5 * 60 * 1000);
+}
 
 /**
  * @typedef {import("./acp-protocol").JsonRpcRequest} JsonRpcRequest
@@ -184,10 +217,46 @@ class AcpClientBase {
     const message = { jsonrpc: "2.0", id, method, params: params ?? {} };
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      // CCG P-15 / P-18: per-method timeout. Without this a hung broker /
+      // gemini CLI would block the caller indefinitely. STREAMING_METHODS
+      // (session/prompt) get a long timeout (default 30 min); everything else
+      // gets a short one (default 5 min). Setting either env var to 0 disables.
+      const timeoutMs = timeoutForMethod(method);
+      let timer = null;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (!this.pending.has(id)) return;
+          this.pending.delete(id);
+          const err = new Error(
+            `ACP request '${method}' timed out after ${Math.round(timeoutMs / 1000)}s`,
+          );
+          /** @type {any} */ (err).jsonrpcCode = REQUEST_TIMEOUT_RPC_CODE;
+          /** @type {any} */ (err).timeout = true;
+          /** @type {any} */ (err).method = method;
+          reject(err);
+        }, timeoutMs);
+        if (typeof timer.unref === "function") timer.unref();
+      }
+
+      const clearTimer = () => {
+        if (timer != null) clearTimeout(timer);
+      };
+
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimer();
+          resolve(value);
+        },
+        reject: (err) => {
+          clearTimer();
+          reject(err);
+        },
+      });
+
       try {
         this.sendMessage(message);
       } catch (error) {
+        clearTimer();
         this.pending.delete(id);
         reject(error);
       }

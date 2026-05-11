@@ -81,6 +81,39 @@ const pendingRequests = new Map();
 /** @type {net.Socket | null} */
 let activeClient = null;
 
+// CCG P-14: broker idle watchdog. The broker daemon is detached + unref'd
+// (broker-lifecycle.mjs spawn options) and has no self-shutdown — without
+// this it lives until reboot or manual kill. Idle = no activeClient for
+// IDLE_TIMEOUT_MS. Override via BROKER_IDLE_TIMEOUT_MS env. 0 disables.
+function parseBrokerIdleTimeout() {
+  const raw = process.env.BROKER_IDLE_TIMEOUT_MS;
+  if (raw == null || raw === "") return 30 * 60 * 1000; // 30 min default
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 30 * 60 * 1000;
+  return n;
+}
+const IDLE_TIMEOUT_MS = parseBrokerIdleTimeout();
+let idleTimer = null;
+
+function startIdleTimer() {
+  if (IDLE_TIMEOUT_MS === 0) return;
+  if (idleTimer != null) return;
+  idleTimer = setTimeout(() => {
+    process.stderr.write(
+      `[acp-broker] idle for ${Math.round(IDLE_TIMEOUT_MS / 60000)} min — exiting.\n`,
+    );
+    shutdown();
+  }, IDLE_TIMEOUT_MS);
+  if (typeof idleTimer.unref === "function") idleTimer.unref();
+}
+
+function cancelIdleTimer() {
+  if (idleTimer != null) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
 function spawnAcpProcess(cwd) {
   const child = spawn("gemini", ["--acp"], {
     cwd,
@@ -194,8 +227,9 @@ function handleAcpLine(line) {
       const hasMore = [...pendingRequests.values()].some(
         (p) => p.clientSocket === pending.clientSocket
       );
-      if (!hasMore) {
+      if (!hasMore && pending.clientSocket === activeClient) {
         activeClient = null;
+        startIdleTimer(); // CCG P-14: nothing active, start idle countdown
       }
     }
     return;
@@ -253,12 +287,14 @@ function handleClientConnection(socket) {
     }
     if (activeClient === socket) {
       activeClient = null;
+      startIdleTimer(); // CCG P-14
     }
   });
 
   socket.on("close", () => {
     if (activeClient === socket) {
       activeClient = null;
+      startIdleTimer(); // CCG P-14
     }
   });
 }
@@ -303,8 +339,15 @@ function handleClientMessage(socket, line) {
     return;
   }
 
+  // CCG P-17: interrupt passthrough. session/cancel is the ACP-native cancel
+  // method (acp-protocol.d.ts:218). Allow it to bypass the busy check so a
+  // second client can cancel the active stream — mirrors codex broker's
+  // turn/interrupt passthrough behavior. The cancel is forwarded to ACP; the
+  // canceled request on the active client will reject via P-9 error wrap.
+  const isInterruptMethod = message.method === "session/cancel";
+
   // Check if broker is busy.
-  if (activeClient && activeClient !== socket) {
+  if (activeClient && activeClient !== socket && !isInterruptMethod) {
     send(socket, {
       jsonrpc: "2.0",
       id: message.id ?? null,
@@ -324,10 +367,19 @@ function handleClientMessage(socket, line) {
   }
 
   // Forward request to ACP process.
-  const newlyActive = activeClient !== socket;
-  activeClient = socket;
-  if (newlyActive) {
-    drainDiagnosticRingTo(socket);
+  // CCG P-17: interrupt passthrough must NOT reassign activeClient — the
+  // notification fan-out at line ~217 only delivers to activeClient, so
+  // hijacking the lock would cause session/update notifications for the
+  // ongoing prompt to be misrouted to the cancel originator. Response
+  // routing happens via pendingRequests map (id-keyed), which works
+  // regardless of activeClient.
+  if (!isInterruptMethod) {
+    const newlyActive = activeClient !== socket;
+    activeClient = socket;
+    if (newlyActive) {
+      drainDiagnosticRingTo(socket);
+    }
+    cancelIdleTimer(); // CCG P-14: broker has work, cancel idle countdown
   }
   const brokerId = nextRpcId++;
   pendingRequests.set(brokerId, { clientSocket: socket, clientId: message.id });
@@ -461,6 +513,11 @@ async function main() {
   // Handle signals.
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+
+  // CCG P-14: start idle watchdog. Broker just spawned with no active client,
+  // so begin the idle countdown immediately. The timer is cleared as soon as
+  // any client activity begins (handleClientMessage → cancelIdleTimer).
+  startIdleTimer();
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
