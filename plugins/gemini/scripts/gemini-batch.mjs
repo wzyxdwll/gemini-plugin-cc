@@ -70,7 +70,11 @@ const NO_MCP_SENTINEL = "__ccgx_no_mcp__";
 // the process actually being stuck. We use idle (no output for N ms) as the
 // primary "stuck" signal and wall-time only as the absolute safety ceiling.
 const DEFAULT_TIMEOUT_MS = 7_200_000;        // 2h
-const DEFAULT_IDLE_TIMEOUT_MS = 600_000;     // 10min
+// 1.1.2: idle is OPT-IN (default 0). gemini-cli --output-format json emits
+// only 4-5 startup warnings, then is silent through reasoning + tool calls,
+// then dumps the final JSON. Any positive idle default kills healthy long
+// tasks. Wall-time stays the safety net.
+const DEFAULT_IDLE_TIMEOUT_MS = 0;
 
 function parseArgs(argv) {
   const opts = {

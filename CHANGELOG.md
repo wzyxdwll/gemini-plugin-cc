@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-05-12
+
+### Fixed (v1.1.1 regression)
+
+- **`gemini-batch.mjs` idle 默认 600000 → 0**（disabled）。v1.1.1 引入的 10min idle 检测在 gemini-cli `--output-format json` 模式下误杀健康长任务——batch 模式只在启动吐 4-5 行 warning，然后进入静默 reasoning + tool call 直到最后才一次性输出 JSON。任何正值 idle 都会在长任务中击中。改为 OPT-IN，wall-time 2h 兜底保留。
+- 调用方仍可显式传 `--idle-timeout-ms <N>` 启用。
+
 ## [1.1.1] - 2026-05-12
 
 ### Added
