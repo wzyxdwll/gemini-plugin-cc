@@ -508,14 +508,33 @@ let server = null;
 
 export const __testing = {
   handleClientConnection,
+  handleClientMessage,
   handleAcpLine,
+  cleanupClientSocket,
+  pendingRequests,
   setActiveClient(socket) {
     activeClient = socket;
+  },
+  setActiveSessionId(id) {
+    activeSessionId = id;
+  },
+  getActiveClient() {
+    return activeClient;
+  },
+  getActiveSessionId() {
+    return activeSessionId;
+  },
+  setAcpProcessMock(proc) {
+    acpProcess = proc;
+  },
+  setAcpReady(ready) {
+    acpReady = Boolean(ready);
   },
   resetBrokerState() {
     diagnosticRing.length = 0;
     pendingRequests.clear();
     activeClient = null;
+    activeSessionId = null;
     acpProcess = null;
     acpReady = false;
     nextRpcId = 1;
