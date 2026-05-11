@@ -308,13 +308,18 @@ async function spawnAndPublishBroker(cwd, sessionDir, options) {
   // broker is usable.
   const ready = await waitForBrokerReady(endpoint, options.timeoutMs ?? 5000);
   if (!ready) {
+    // CCG: preserve broker.log + sessionDir on spawn failure so the user
+    // can diagnose why broker→ACP initialize never completed (auth, network,
+    // gemini CLI bug, etc.). The pid is still killed and the endpoint
+    // unlinked — only the diagnostic artifacts survive.
     teardownBrokerSession({
       endpoint,
       pidFile,
       logFile,
       sessionDir,
       pid: child.pid ?? null,
-      killProcess: options.killProcess ?? null
+      killProcess: options.killProcess ?? null,
+      preserveLog: true
     });
     return null;
   }
@@ -335,7 +340,7 @@ async function spawnAndPublishBroker(cwd, sessionDir, options) {
  *
  * @param {{ endpoint?: string | null, pidFile?: string | null, logFile?: string | null, sessionDir?: string | null, pid?: number | null, killProcess?: ((pid: number) => void) | null }} params
  */
-export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
+export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null, preserveLog = false }) {
   if (Number.isFinite(pid) && killProcess) {
     try {
       killProcess(pid);
@@ -348,7 +353,12 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
     fs.unlinkSync(pidFile);
   }
 
-  if (logFile && fs.existsSync(logFile)) {
+  // CCG: preserveLog allows callers (notably spawn-failure paths) to keep
+  // broker.log around so a post-mortem can find why startup didn't complete.
+  // Without this, every failed waitForBrokerReady tear-down deletes the
+  // exact file needed to diagnose what happened — turning every transient
+  // ACP hang into a silent reboot loop.
+  if (!preserveLog && logFile && fs.existsSync(logFile)) {
     fs.unlinkSync(logFile);
   }
 
@@ -363,7 +373,9 @@ export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessi
     }
   }
 
-  if (sessionDir) {
+  // Session dir removal also skipped when preserving log, since the log
+  // lives inside the session dir.
+  if (!preserveLog && sessionDir) {
     try {
       fs.rmSync(sessionDir, { recursive: true, force: true });
     } catch {
