@@ -565,8 +565,24 @@ async function main() {
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
   const target = parseBrokerEndpoint(options.endpoint);
 
-  // Clean up stale socket file.
+  // CCG W2: clean up stale socket file, but only if no live broker is
+  // listening on it. Without this check, a fresh broker starting up could
+  // unlink the socket of another broker that is currently serving clients
+  // (e.g. concurrent ensureBrokerSession race that slipped past the lock
+  // due to clock skew or a stale lock reclaim).
   if (target.kind === "unix" && fs.existsSync(target.path)) {
+    const inUse = await new Promise((resolve) => {
+      const probe = net.createConnection({ path: target.path });
+      const t = setTimeout(() => { probe.destroy(); resolve(false); }, 250);
+      probe.on("connect", () => { clearTimeout(t); probe.end(); resolve(true); });
+      probe.on("error", () => { clearTimeout(t); probe.destroy(); resolve(false); });
+    });
+    if (inUse) {
+      process.stderr.write(
+        `ACP broker: socket ${target.path} already serving a live broker — refusing to start.\n`,
+      );
+      process.exit(0);
+    }
     fs.unlinkSync(target.path);
   }
 

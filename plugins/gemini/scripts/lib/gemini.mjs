@@ -6,10 +6,13 @@
  * (JSON-RPC 2.0 via `gemini --acp`) instead of Codex's app-server.
  */
 
+import net from "node:net";
+
 import { readJsonFile } from "./fs.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, GeminiAcpClient } from "./acp-client.mjs";
 import { sanitizeDiagnosticMessage } from "./acp-diagnostics.mjs";
-import { loadBrokerSession } from "./broker-lifecycle.mjs";
+import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
+import { isBrokerEndpointReady, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable, runCommand } from "./process.mjs";
 import { collectReviewContext } from "./git.mjs";
 import { loadPrompt } from "./prompts.mjs";
@@ -614,22 +617,52 @@ export async function runAcpAdversarialReview(cwd, options = {}) {
  * @returns {Promise<{ attempted: boolean, interrupted: boolean }>}
  */
 export async function interruptAcpPrompt(cwd, options = {}) {
-  try {
-    const client = await GeminiAcpClient.connect(cwd, {
-      reuseExistingBroker: true,
-      env: options.env
-    });
-    try {
-      client.notify("session/cancel", {
-        sessionId: options.sessionId
-      });
-      return { attempted: true, interrupted: true };
-    } finally {
-      await client.close();
-    }
-  } catch {
-    return { attempted: true, interrupted: false };
+  // CCG W1: only cancel if a live broker exists for this workspace. The
+  // pre-fix code went through GeminiAcpClient.connect(cwd, { reuseExistingBroker:
+  // true }), which — when no broker session was on disk OR when broker
+  // initialize failed mid-connect — silently fell through to spawning a
+  // brand-new gemini --acp child via SpawnedAcpClient and sent session/cancel
+  // to it. That child has no active session, so cancel is a no-op, but the
+  // caller observed interrupted=true and the user got a fake success message.
+  //
+  // The fix bypasses the connect() factory entirely: we open a raw socket
+  // to the broker endpoint and write one JSON-RPC notification. No fallback
+  // path can ever spawn a new ACP child here.
+  const session = loadBrokerSession(cwd);
+  if (!session?.endpoint || !(await isBrokerEndpointReady(session.endpoint))) {
+    return { attempted: false, interrupted: false };
   }
+
+  return new Promise((resolve) => {
+    let target;
+    try {
+      target = parseBrokerEndpoint(session.endpoint);
+    } catch {
+      resolve({ attempted: true, interrupted: false });
+      return;
+    }
+    const socket = net.createConnection({ path: target.path });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve({ attempted: true, interrupted: false });
+    }, 2000);
+    socket.on("connect", () => {
+      const notification = {
+        jsonrpc: "2.0",
+        method: "session/cancel",
+        params: options.sessionId ? { sessionId: options.sessionId } : {},
+      };
+      socket.write(`${JSON.stringify(notification)}\n`);
+      socket.end();
+      clearTimeout(timer);
+      resolve({ attempted: true, interrupted: true });
+    });
+    socket.on("error", () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ attempted: true, interrupted: false });
+    });
+  });
 }
 
 /**

@@ -154,7 +154,7 @@ export function clearBrokerSession(cwd) {
   }
 }
 
-async function isBrokerEndpointReady(endpoint) {
+export async function isBrokerEndpointReady(endpoint) {
   if (!endpoint) {
     return false;
   }
@@ -172,12 +172,88 @@ async function isBrokerEndpointReady(endpoint) {
  * @param {{ env?: NodeJS.ProcessEnv, killProcess?: (pid: number) => void, timeoutMs?: number }} [options]
  * @returns {Promise<{ endpoint: string, pidFile: string, logFile: string, sessionDir: string, pid: number | null } | null>}
  */
+// CCG W2: per-workspace broker startup lock. Without this, two companion CLIs
+// starting concurrently both observe `existing` is null/dead, both proceed to
+// teardown + spawn, and end up with two broker daemons listening on the same
+// endpoint (or, on POSIX, racing on unlink + listen of the same socket
+// file). The lock serializes the check-spawn-publish sequence so only the
+// first caller spawns; subsequent callers acquire the lock after broker is
+// up and find `existing` valid on re-load.
+//
+// Stale-lock policy: a lock file older than LOCK_STALE_MS is treated as
+// abandoned (the holder probably crashed before releasing) and forcibly
+// unlinked. 30 s is generous vs the ~5 s spawn budget.
+const LOCK_FILE_NAME = "broker.lock";
+const LOCK_STALE_MS = 30_000;
+const LOCK_POLL_MS = 50;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireBrokerLock(sessionDir, timeoutMs = 8000) {
+  const lockPath = path.join(sessionDir, LOCK_FILE_NAME);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeSync(fd, String(process.pid));
+      } finally {
+        fs.closeSync(fd);
+      }
+      return lockPath;
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          // Holder likely crashed — reclaim.
+          try { fs.unlinkSync(lockPath); } catch { /* race with another reaper */ }
+          continue;
+        }
+      } catch {
+        // lockPath disappeared between EEXIST and stat — retry.
+        continue;
+      }
+      await sleep(LOCK_POLL_MS);
+    }
+  }
+  throw new Error(`Could not acquire broker lock at ${lockPath} within ${timeoutMs}ms`);
+}
+
+function releaseBrokerLock(lockPath) {
+  if (!lockPath) return;
+  try { fs.unlinkSync(lockPath); } catch { /* already removed */ }
+}
+
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
   if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
     return existing;
   }
 
+  const sessionDir = resolveSessionDir(cwd);
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  // CCG W2: serialize broker startup. Re-check `existing` after acquiring
+  // the lock — another concurrent caller may have just spawned the broker
+  // while we were waiting.
+  const lockPath = await acquireBrokerLock(sessionDir);
+  try {
+    const recheck = loadBrokerSession(cwd);
+    if (recheck && (await isBrokerEndpointReady(recheck.endpoint))) {
+      return recheck;
+    }
+
+    return await spawnAndPublishBroker(cwd, sessionDir, options);
+  } finally {
+    releaseBrokerLock(lockPath);
+  }
+}
+
+async function spawnAndPublishBroker(cwd, sessionDir, options) {
+  const existing = loadBrokerSession(cwd);
   if (existing) {
     teardownBrokerSession({
       endpoint: existing.endpoint ?? null,
@@ -189,9 +265,6 @@ export async function ensureBrokerSession(cwd, options = {}) {
     });
     clearBrokerSession(cwd);
   }
-
-  const sessionDir = resolveSessionDir(cwd);
-  fs.mkdirSync(sessionDir, { recursive: true });
 
   const endpoint = createBrokerEndpoint(sessionDir);
   const pidFile = path.join(sessionDir, "broker.pid");
