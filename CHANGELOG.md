@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-04
+
+### Added
+
+- **`~/.gemini/.env` 认证桥接**（新模块 `scripts/lib/gemini-env.mjs`）。gemini-cli 0.42 仅在 folder-trust **信任**的 cwd 下加载 `~/.gemini/.env`（`security.folderTrust` 默认开启），未信任目录里 `findEnvFile()` 跳过该路径 → 用户的 `GEMINI_API_KEY` 明明在文件里却被报"未配置"。`applyHomeGeminiAuthEnv()` 在进程入口把 `~/.gemini/.env` 的 4-key auth allowlist（`GEMINI_API_KEY` / `GOOGLE_API_KEY` / `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`）**仅在缺失时**提升进 `process.env`，让 gemini-cli 走"环境变量优先"路径绕过 trust 门。一个机制同时修复检测层误报与执行层未认证。
+- 4 个会带认证调用 gemini 的进程入口接入桥接：`gemini-companion.mjs`、`gemini-batch.mjs`、`acp-broker.mjs`、`stop-review-gate-hook.mjs`。
+- **opt-out**：`GEMINI_COMPANION_NO_ENV_BRIDGE` 设为真值（如 `1`/`true`）禁用桥接；`0`/`false`/空被忽略。
+- `tests/gemini-env.test.mjs`（19 测试，含入口 wiring 防回归）。
+
+### Fixed
+
+- **stop-review-gate-hook fail-closed**：未信任目录下，hook 进程内的 gemini review 因"未配置"返回非 0 → 直接 block 会话停止。桥接覆盖该路径后消除。
+
+### Why
+
+根因是 gemini-cli 把 `~/.gemini/.env` 的加载放在 folder-trust 门后，而 plugin 用 `env: process.env` spawn 时从不透传该文件、子进程在未信任 cwd 自己也读不到它。auth 类 key 本就不是 folder-trust 的保护面——gemini-cli 自身在未信任目录也会从 `~/.env`/项目 `.env` 加载同一份 allowlist——因此提升 home 级 auth key 不引入新的信任越权；项目级 `.env` 仍受 trust 门保护。
+
 ## [1.1.2] - 2026-05-12
 
 ### Fixed (v1.1.1 regression)

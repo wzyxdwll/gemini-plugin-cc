@@ -62,6 +62,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 
+import { applyHomeGeminiAuthEnv } from "./lib/gemini-env.mjs";
+
 const NO_MCP_SENTINEL = "__ccgx_no_mcp__";
 
 // Defaults are wide on purpose. gemini-batch is a one-shot wrapper around a
@@ -230,6 +232,10 @@ function extractJsonPayload(stdout) {
 }
 
 async function main() {
+  // Bridge ~/.gemini/.env auth keys past gemini-cli's folder-trust gate so the
+  // spawned gemini (env: process.env) is authenticated. See lib/gemini-env.mjs.
+  applyHomeGeminiAuthEnv();
+
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));

@@ -19,6 +19,7 @@ import { getConfig, listJobs } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { loadPrompt } from "./lib/prompts.mjs";
 import { runCommand } from "./lib/process.mjs";
+import { applyHomeGeminiAuthEnv } from "./lib/gemini-env.mjs";
 
 function readHookInput() {
   const raw = fs.readFileSync(0, "utf8").trim();
@@ -88,6 +89,11 @@ function runStopReview(cwd, input) {
 }
 
 function main() {
+  // Bridge ~/.gemini/.env auth keys before the in-process gemini review runs,
+  // so an untrusted cwd doesn't make the gate fail closed on "not configured".
+  // See lib/gemini-env.mjs.
+  applyHomeGeminiAuthEnv();
+
   const input = readHookInput();
   const cwd = input.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
 

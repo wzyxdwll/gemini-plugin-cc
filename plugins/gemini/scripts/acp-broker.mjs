@@ -26,6 +26,7 @@ import {
   sanitizeDiagnosticMessage
 } from "./lib/acp-diagnostics.mjs";
 import { buildGeminiAcpArgs } from "./lib/acp-args.mjs";
+import { applyHomeGeminiAuthEnv } from "./lib/gemini-env.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 import { listenOnRestrictedUnixSocket } from "./lib/socket-permissions.mjs";
 import { spawn } from "node:child_process";
@@ -566,6 +567,12 @@ function shutdown() {
 }
 
 async function main() {
+  // Self-sufficient auth: the broker is a long-lived daemon that may be reused
+  // across sessions, so hoist ~/.gemini/.env auth keys here too — its gemini
+  // --acp child (env: process.env) then authenticates regardless of who spawned
+  // the broker or the cwd trust state. See lib/gemini-env.mjs.
+  applyHomeGeminiAuthEnv();
+
   const [subcommand, ...argv] = process.argv.slice(2);
   if (subcommand !== "serve") {
     throw new Error(

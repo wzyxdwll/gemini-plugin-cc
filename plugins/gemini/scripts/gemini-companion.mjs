@@ -62,6 +62,7 @@ import {
 } from "./lib/render.mjs";
 import { THINKING_LEVELS } from "./lib/thinking.mjs";
 import { createStreamHandler } from "./lib/stream-output.mjs";
+import { applyHomeGeminiAuthEnv } from "./lib/gemini-env.mjs";
 
 // CCG P-12 patch: prevent CLAUDE_PLUGIN_DATA cross-contamination from previous
 // plugin invocations (e.g., codex). Recompute from this script's physical path
@@ -727,6 +728,11 @@ function spawnBackgroundWorker(workspaceRoot, jobId) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
+  // Hoist ~/.gemini/.env auth keys into process.env before dispatch so auth
+  // detection and every gemini child (spawned with env: process.env) inherit
+  // them regardless of folder-trust state. See lib/gemini-env.mjs.
+  applyHomeGeminiAuthEnv();
+
   const [subcommand, ...argv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
     printUsage();
