@@ -92,12 +92,18 @@ test("applyHomeGeminiAuthEnv: treats empty string as absent", () => {
   assert.equal(target.GEMINI_API_KEY, "fromfile");
 });
 
-test("GEMINI_AUTH_ENV_KEYS mirrors gemini-cli auth allowlist", () => {
+test("GEMINI_AUTH_ENV_KEYS covers auth keys AND endpoint routing", () => {
+  // The endpoint-routing keys must be bridged alongside the auth key: bridging
+  // GEMINI_API_KEY without GOOGLE_GEMINI_BASE_URL would send a self-hosted
+  // gateway key to Google's official endpoint. See gemini-env.mjs.
   assert.deepEqual(GEMINI_AUTH_ENV_KEYS, [
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_CLOUD_LOCATION"
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_GEMINI_BASE_URL",
+    "GOOGLE_VERTEX_BASE_URL",
+    "GOOGLE_GENAI_USE_VERTEXAI"
   ]);
 });
 

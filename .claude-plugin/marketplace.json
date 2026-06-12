@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "ccgx-maintained fork of gemini-plugin-cc with P-1..P-21 + W1/W2/I1 patches for Windows pipe isolation, ACP timeouts, broker idle/cleanup, interrupt passthrough, and observability.",
-    "version": "1.0.1-ccgx"
+    "version": "1.3.0"
   },
   "plugins": [
     {
       "name": "gemini",
       "description": "Use Gemini from Claude Code to review code or delegate tasks (ccgx-patched fork).",
-      "version": "1.0.1-ccgx",
+      "version": "1.3.0",
       "author": {
         "name": "wzy / ccgx (forked from Sakib Sadman Shajib)"
       },

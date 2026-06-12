@@ -51,7 +51,15 @@ export const GEMINI_AUTH_ENV_KEYS = [
   "GEMINI_API_KEY",
   "GOOGLE_API_KEY",
   "GOOGLE_CLOUD_PROJECT",
-  "GOOGLE_CLOUD_LOCATION"
+  "GOOGLE_CLOUD_LOCATION",
+  // Endpoint routing must be hoisted alongside the key. Without these, a user
+  // whose ~/.gemini/.env points GEMINI_API_KEY at a self-hosted gateway via
+  // GOOGLE_GEMINI_BASE_URL gets the key bridged but NOT the base-url — so the
+  // child sends that gateway key to Google's default official endpoint. Vertex
+  // base-url and the Vertex toggle are included for the same reason.
+  "GOOGLE_GEMINI_BASE_URL",
+  "GOOGLE_VERTEX_BASE_URL",
+  "GOOGLE_GENAI_USE_VERTEXAI"
 ];
 
 function homeGeminiEnvPath() {

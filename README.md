@@ -420,7 +420,27 @@ Claude Code ──[Bash]──> gemini-companion.mjs ──[Unix socket]──> 
 - **gemini-companion.mjs** — Main CLI handling all subcommands
 - **acp-broker.mjs** — Persistent daemon multiplexing JSON-RPC requests via Unix socket
 - **acp-client.mjs** — Client with broker-first, direct-spawn fallback
+- **gemini-batch.mjs** — Non-ACP batch runtime (default task path; see flags below)
 - **lib modules** — Git context, state persistence, job tracking, rendering
+
+### Batch runtime flags (`gemini-batch.mjs task`)
+
+| Flag | Behavior |
+|------|----------|
+| `-p, --prompt <text>` | Prompt text, fed to gemini-cli over stdin. |
+| `--prompt-file <path>` | Read the prompt body from a file; **takes priority over `-p`**. Use for large prompts — Windows spawn fails with `ENAMETOOLONG` when total argv exceeds ~32K. Missing file is a hard error. |
+| `--write` | Maps to gemini-cli `--approval-mode auto_edit` (auto-approve edit tools only). |
+| `--yolo` | Maps to `--approval-mode yolo` (auto-approve ALL tools). |
+| `--approval-mode <m>` | Explicit `default\|auto_edit\|yolo\|plan`, wins over `--write`/`--yolo`. |
+| *(no write flag)* | Maps to `--approval-mode default`: headless runs auto-reject approval-requiring tools, so writes are denied. `plan` is deliberately **not** used — in non-interactive mode gemini-cli auto-approves `exit_plan_mode` and escalates the session to YOLO, so `plan` is not a read-only guarantee there. |
+| `--model <name>` | Forwarded as `-m <name>`. |
+| `--resume <id>` / `--resume-last` | Forwarded as `-r <id>` / `-r latest`; explicit id wins. |
+| `--mcp-allow <names>` | Allowlist of real MCP server names; beats `--allow-mcp`. Default suppresses all MCP servers via a sentinel allowlist. |
+| `--include-directories <dirs>` | Extra read-only workspace dirs, forwarded verbatim. |
+| `--stream-output` | Switch to `-o stream-json` (JSONL events; enables meaningful idle detection). |
+| `--timeout-ms` / `--idle-timeout-ms` | Wall-clock ceiling (default 2h) / opt-in idle kill (default off). |
+
+Every invocation also passes `--skip-trust` (avoids the non-interactive folder-trust prompt hanging the run; note this weakens the folder-trust boundary for the spawned session) and `-e none` (no extensions, reproducible context). On Windows the `gemini` `.cmd` shim is spawned through an escaped `cmd.exe` wrapper — never `shell: true` — so prompt/model/dir values containing `& | % "` cannot inject commands.
 
 ## FAQ
 
@@ -444,19 +464,20 @@ Yes. Because the plugin uses your local Gemini CLI, your existing authentication
 
 ## Status & Known Limitations
 
-**Current version:** v1.0.0 — tested on Linux/macOS with Google OAuth only. Windows is untested.
+**Current version:** v1.3.0 (ccgx fork) — Windows-native is now the primary tested target. The default task path is the non-ACP `gemini-batch` runtime (win32-safe spawn, no broker), with the ACP broker kept for resume / streaming / multi-turn.
 
 | Area | Status |
 |------|--------|
 | Core commands (`review`, `rescue`, `status`, `result`, `cancel`) | Working |
-| Background jobs + broker persistence | Working |
-| Review gate (`/gemini:setup --enable-review-gate`) | Working — see warning in docs |
-| Scope validation (`--scope` flag) | [Known bug #1](https://github.com/sakibsadmanshajib/gemini-plugin-cc/issues/1) — falls through to default silently |
-| Protocol method mismatch edge cases | [Known bug #2](https://github.com/sakibsadmanshajib/gemini-plugin-cc/issues/2) |
-| Windows (Native) and macOS | Untested |
-| WSL and Linux | Tested |
-| `GEMINI_API_KEY` auth | Untested |
-| Vertex AI auth | Untested |
+| `gemini-batch` default path (non-ACP, win32-safe spawn) | Working — resume / `--stream-output` / approval-mode (1.3.0) |
+| Background jobs + broker persistence (ACP path) | Working — broker idle watchdog + client timeouts (1.1.0) |
+| Review gate (`/gemini:setup --enable-review-gate`) | Working — fail-closed on Windows after win32-safe spawn fix (1.3.0) |
+| Scope validation (`--scope` flag) | Fixed in 1.0.1 (#9) |
+| Protocol method mismatch edge cases | Fixed in 1.0.1 (#10) |
+| Windows (Native) | Tested (primary target) |
+| WSL / Linux / macOS | Tested |
+| `GEMINI_API_KEY` auth (incl. self-hosted base-url) | Working — `~/.gemini/.env` bridge incl. `GOOGLE_GEMINI_BASE_URL` (1.3.0) |
+| Vertex AI auth | Working — base-url + `GOOGLE_GENAI_USE_VERTEXAI` bridged (1.3.0) |
 
 **Requirements reminder:** Gemini CLI (`@google/gemini-cli`) must be installed and authenticated separately — this plugin is a bridge, not a bundled runtime.
 

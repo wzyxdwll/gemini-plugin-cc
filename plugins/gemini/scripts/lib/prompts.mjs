@@ -4,8 +4,12 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const PROMPTS_DIR = path.resolve(new URL("../../prompts", import.meta.url).pathname);
+// fileURLToPath, not new URL(...).pathname: on Windows the latter yields
+// "/C:/Users/..." and path.resolve then prepends the cwd drive letter, producing
+// an invalid "D:\C:\..." path → loadPrompt() ENOENTs every prompt template.
+const PROMPTS_DIR = fileURLToPath(new URL("../../prompts", import.meta.url));
 
 /**
  * Load a prompt template by name and interpolate variables.

@@ -13,11 +13,10 @@
 import fs from "node:fs";
 import net from "node:net";
 import process from "node:process";
-import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, loadBrokerSession } from "./broker-lifecycle.mjs";
-import { terminateProcessTree } from "./process.mjs";
+import { spawnSafe, terminateProcessTree } from "./process.mjs";
 import { buildGeminiAcpArgs } from "./acp-args.mjs";
 import { attachStderrDiagnosticCollector, BROKER_DIAGNOSTIC_METHOD, sanitizeDiagnosticMessage } from "./acp-diagnostics.mjs";
 
@@ -118,6 +117,39 @@ class AcpClientBase {
       message = JSON.parse(trimmed);
     } catch {
       return;
+    }
+
+    // Server→client reverse REQUEST (has BOTH id and method): the gemini --acp
+    // agent asks us to e.g. `session/request_permission` or read/write a file
+    // via `fs/*`. We never advertise fs/permission client capabilities in the
+    // handshake (see InitializeParams), so a compliant agent should not send
+    // these — but auto_edit mode can. With no handler the agent blocks waiting
+    // for a response until the 30-min streaming timeout. Reply immediately with
+    // JSON-RPC -32601 so the agent fails the operation fast instead of hanging.
+    //
+    // Direct transport only: sendMessage writes to the gemini child's stdin, so
+    // the reply reaches the agent. In broker mode the broker relays the reverse
+    // request to us but has no client→child response path, so a broker-mode
+    // hang is NOT closed by this alone — see PLUGIN-PATCHES.md.
+    if ("id" in message && message.id !== null && typeof message.method === "string" && message.method) {
+      if (!this.pending.has(message.id)) {
+        try {
+          this.sendMessage({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32601,
+              message: `Method not supported: ${message.method}`
+            }
+          });
+        } catch {
+          // Best-effort: if the transport is already gone, the agent will
+          // observe the disconnect and abort on its own.
+        }
+        return;
+      }
+      // A response and a pending request can never share an id in practice, but
+      // if they did, fall through to the response path below.
     }
 
     // Response (has id).
@@ -340,11 +372,12 @@ class SpawnedAcpClient extends AcpClientBase {
 
   async initialize() {
     const env = this.options.env ?? process.env;
-    this.proc = spawn("gemini", buildGeminiAcpArgs(env), {
+    // spawnSafe: PATHEXT-resolved .cmd wrap with cmdEscapeArg-quoted args —
+    // never `shell: true`, which performs no escaping (cmd.exe injection).
+    this.proc = spawnSafe("gemini", buildGeminiAcpArgs(env), {
       cwd: this.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: process.platform === "win32",
       windowsHide: true
     });
 

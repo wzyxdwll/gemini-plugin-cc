@@ -80,7 +80,7 @@ test("rescue command uses inline execution without subagent delegation", () => {
   assert.match(agent, /--resume/);
   assert.match(agent, /--fresh/);
   assert.match(agent, /thin forwarding wrapper/i);
-  assert.match(agent, /prefer foreground for a small, clearly bounded rescue request/i);
+  assert.match(agent, /Prefer foreground execution\. The batch runtime runs in the foreground and exits when the task completes/i);
   assert.match(agent, /Use exactly one `Bash` call/i);
   assert.match(agent, /Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
@@ -89,7 +89,7 @@ test("rescue command uses inline execution without subagent delegation", () => {
   assert.match(agent, /auto-gemini-2\.5/i);
   assert.match(agent, /\bpro\b/i);
   assert.match(agent, /If the user asks for `flash`, map that to `--model gemini-3-flash-preview`/i);
-  assert.match(agent, /Return the stdout of the `gemini-companion` command exactly as-is/i);
+  assert.match(agent, /Return the stdout of the forwarded command exactly as-is/i);
   assert.match(agent, /If the Bash call fails or Gemini cannot be invoked, return nothing/i);
   assert.match(agent, /gemini-prompting/);
   assert.match(agent, /only to tighten the user's request into a better Gemini prompt/i);

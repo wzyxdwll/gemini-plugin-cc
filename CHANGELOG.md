@@ -5,6 +5,128 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-06-12
+
+win32-safe spawn 根治 + gemini-batch resume/stream/approval 能力补全 + 一组安全收敛。
+本版把 `gemini-batch.mjs`（1.1.0 引入的非 ACP 快路径入口）从「能跑」推进到「功能对齐
+companion + 在未信任目录/Windows 下安全可靠」，并修掉两个会让整条 Windows 路径静默失效的
+根因（`prompts.mjs` 路径、`process.mjs` spawn）。
+
+### Added
+
+- **`gemini-batch.mjs` session resume (`F4`)**：新增 `--resume <id|index>`（→ `gemini -r <id>`）
+  与 `--resume-last`（→ `gemini -r latest`）。显式 id 优先于 `--resume-last`——并行双模型
+  跑会在 `latest` 上撞车，调用方手里有 `threadId` 时应永远赢。`--resume-last` 从旧的
+  companion-compat no-op 提升为真实转发。
+- **`gemini-batch.mjs` streaming 输出 (`F5`)**：`--stream-output` 把 CLI 切到
+  `-o stream-json`（JSONL 事件流）。新增 `createStreamParser`：增量解析每行 JSONL，从
+  `message`（`delta:true` 追加 / 否则整条替换）重建 assistant 文本，从 terminal `result`
+  事件提 `stats`（token usage），`init` 事件取 `session_id`/`model`。每行刷新 idle 时钟——
+  长任务的 idle 检测自此才有意义（plain `json` 模式全程静默，任何正 idle 都误杀）。默认仍
+  plain `json`（BC）。
+- **`gemini-batch.mjs` approval mode (`F6`)**：新增 `--yolo` / `--approval-mode <default|auto_edit|yolo|plan>`，
+  并新增 `resolveApprovalMode()`：显式 `--approval-mode` 最高优先；`--write --yolo` → `yolo`；
+  `--write` → `auto_edit`；无 `--write`（只读任务）→ `default`（headless 下自动拒一切需审批的
+  tool call，写操作被拒）。**不映射 `plan`**：gemini-cli 0.42 非交互模式下 `exit_plan_mode`
+  的 `getAllowApprovalMode()` 直接返回 YOLO——模型自己调一次 exit_plan_mode 就把会话升级成
+  全自动批准，`plan` 在 batch 模式下不是只读保证（已在 CLI bundle 源码核实）。
+  **总是显式传 `--approval-mode`**，权限级别由本层钉死而非依赖 CLI build 的默认值。
+- **`gemini-batch.mjs` `--prompt-file <path>`**：从文件读 prompt 正文，优先级高于 `-p/--prompt`，
+  文件不可读则按既有 error envelope 格式报错退出。动机：Windows spawn 在 argv 总长超
+  ~32K 时同步抛 `ENAMETOOLONG`——大段 review prompt 不能走 argv，必须走文件。
+- **`gemini-batch.mjs` `--mcp-allow <names>` (`C8`)**：选择性 MCP allowlist（真实 server 名
+  逗号/空格列表），优先于 `--allow-mcp`；ccgx 集成 helper 借此转发检索类 server
+  （fast-context / context7），其余 server 维持默认全压制、batch 启动保持快。
+- **`gemini-batch.mjs` `--include-directories <dirs>` (`C9`)**：额外只读 workspace 目录，
+  逐字转发 gemini-cli `--include-directories`，用于跨仓 / worktree review。
+- **`gemini-batch.mjs` 可测试面 + 行为测试**：`buildCliArgs` 抽成纯函数，入口加
+  isMainModule 守卫（import 不再触发 main），末尾导出
+  `__testing = { parseArgs, resolveApprovalMode, resolvePrompt, buildCliArgs, createStreamParser, ... }`。
+  新增 `tests/gemini-batch.test.mjs`（19 用例）：approval-mode 优先级矩阵、C8 三分支、
+  C9 条件转发、`--skip-trust`/`-e none` 恒在、`--prompt-file` 解析与优先级、stream buf cap、
+  win32 spawn 注入回归（`.cmd` shim：`&`/`%`/空格逐字到达、链式命令不执行、stdin 透传、
+  embedded-quote fail-closed）。
+- **`lib/process.mjs` `spawnSafe()` 导出**：异步 spawn 版的 buildSafeSpawn 封装（PATHEXT
+  解析 + `.cmd` 经 cmd.exe 包裹 + 全 args 过 `cmdEscapeArg`），非 win32 平台为普通 spawn。
+  三处 `shell:true` spawn 全部改走它：`gemini-batch.mjs` 主 spawn、
+  `acp-client.mjs` SpawnedAcpClient、`acp-broker.mjs` spawnAcpProcess（env 派生的
+  allowlist 参数同样过转义）。代码库自此零 `shell:true`。
+- **`gemini-batch.mjs` `--skip-trust` + `-e none` (`F7`)**：spawn gemini-cli 时传
+  `--skip-trust`（信任当前 cwd，治 env-bridge 根因：gemini-cli 在未信任目录跳过项目级
+  config）+ `-e none`（禁所有 extension，保 fresh-context subagent prompt 纯净可复现）。
+  env bridge 保留作 fallback（部分 CLI build 独立于 trust 门 gate env 加载）。
+- **`gemini-batch.mjs` stdout 背压 cap (`F8`)**：32MiB 上限，镜像 ACP 路径的 1MiB
+  backpressure 守卫。超限后停止累积（保留已有部分做 best-effort parse），但继续喂 stream
+  parser（只持单行 partial）。错误信息标注 `stdout truncated at <N> bytes`。
+- **`createStreamParser` 行缓冲上限（8MiB）**：补齐 F8 防线——parser 自持的未完成行缓冲
+  原本无上限，无换行洪流可绕过 32MiB stdout cap 直至 OOM。超限丢弃当前 partial 行并计入
+  `parseErrors`，后续完整行照常解析。
+- **auth base-url 桥接 (`GEMINI_AUTH_ENV_KEYS` 扩展)**：补 `GOOGLE_GEMINI_BASE_URL` /
+  `GOOGLE_VERTEX_BASE_URL` / `GOOGLE_GENAI_USE_VERTEXAI` 三个 endpoint 路由 key。只桥接
+  `GEMINI_API_KEY` 不桥接 base-url，会把指向自建网关的 key 发到 Google 官方 endpoint。
+  `tests/gemini-env.test.mjs` 同步断言新 allowlist。
+- **`lib/process.mjs` Windows 安全 spawn**：新增 `resolveWindowsCommand`（PATH×PATHEXT
+  解析绝对路径，镜像 Go `exec.LookPath`）+ `buildSafeSpawn`（`.cmd`/`.bat` 经
+  `cmd.exe /d /s /c "<path>" <args>` + `windowsVerbatimArguments`，CVE-2024-27980 缓解）。
+  `runCommand` / `binaryAvailable` 接入。
+
+### Changed
+
+- **`gemini-rescue` agent 默认路由 batch**：默认 forward `gemini-batch.mjs`（一次性 rescue
+  无需 ACP 多轮/streaming/`fs/*`，Windows 上 ACP 路径稳定卡分钟级）；仅 resume 续跑
+  （`--resume` 且无 `--fresh`）fallback 到 `gemini-companion.mjs --resume-last`。`--write`
+  语义文档同步为 `auto_edit`（非任意 shell），read-only 为 `default`（headless 自动拒写）。
+- **`extractJsonPayload` 改 brace-depth 扫描**：从首个 `{` 起追踪括号深度（忽略字符串字面量
+  内的括号）返回第一个平衡对象。旧 `JSON.parse(stdout.slice(indexOf('{')))` 遇 payload 前后
+  任意裸 warning 行就抛——gemini-cli 会在 JSON 前/后写 warning 到 stdout。
+- **marketplace.json / plugin.json → 1.3.0**：version-sync（plugin.json 已先行至 1.2.0，
+  本版与 marketplace 一并提到 1.3.0）。
+
+### Fixed
+
+- **`prompts.mjs` Windows 路径（fileURLToPath）**：`new URL("../../prompts", import.meta.url).pathname`
+  在 Windows 产出 `/C:/Users/...`，`path.resolve` 再拼上 cwd 盘符 → `D:\C:\...` 非法路径
+  → `loadPrompt()` 对**每个** prompt 模板 ENOENT。改用 `fileURLToPath(new URL(...))`。这是个
+  让整条 Windows prompt-加载路径静默全挂的根因。
+- **`process.mjs` spawn 不再依赖 `shell:true`**：bare `gemini`（Windows 上是 `.cmd` шим）
+  经 spawnSync ENOENT → `getGeminiAvailability()` 报「不可用」→ Stop review gate 在每台
+  Windows 装机上静默 fail-open（review 从不跑）。改走绝对路径解析 + `shell:false`——
+  顺带消除把整段模型响应塞进 `-p` 时 `shell:true` 的 cmd 命令注入面。
+- **`acp-client.mjs` 反向请求不再挂死 (acp-handler)**：server→client 反向 REQUEST
+  （同时带 `id` + `method`，如 `fs/*` / `session/request_permission`）在无 handler 时会让
+  agent 等到 30min streaming timeout。现立即回 JSON-RPC `-32601`（Method not supported）
+  让 agent 快速失败。**仅直连 transport 闭环**（sendMessage 直写 gemini child stdin）；
+  broker 模式无 client→child 响应路径，broker-mode hang 不被此单独闭合（见 PLUGIN-PATCHES.md）。
+
+### Security
+
+- **read-only 任务默认拒写（`default`，非 `plan`）**：`resolveApprovalMode` 默认（无 `--write`）
+  → gemini-cli `default` 模式——headless 下需审批的写工具一律被自动拒绝。`plan` 看似更硬，
+  实测在非交互模式存在逃逸：`exit_plan_mode` 被策略自动批准后会话切 YOLO（CLI 源码
+  `getAllowApprovalMode()` 对 `!isInteractive()` 返回 YOLO）。`default` 才是 batch 模式下
+  最接近硬保证的只读映射——这正是审计 flag 的「安全坍缩」修复点。注意 `--skip-trust`
+  仍然保留（非交互防挂起所需），它会削弱 spawned 会话的 folder-trust 信任边界。
+- **Windows spawn 去 shell 注入面（全量根治）**：`spawnSafe` 接管全部三处异步 spawn
+  （gemini-batch 主 spawn / SpawnedAcpClient / broker spawnAcpProcess），加上既有的
+  `runCommand`，代码库零 `shell:true`。argv 内容（prompt、model、include dirs、env 派生
+  allowlist）永不交给 shell 解析器：`.cmd` shim 经 cmd.exe 包裹时每个参数过 `cmdEscapeArg`，
+  `& | < > ( ) ^ %` 全部失效。stop-review-gate 把整段 session 响应经 `-p` 入 argv，
+  `shell:true` 会把任意 session 内容变成 cmd.exe 命令注入面。注入回归用例钉死该面
+  （`tests/gemini-batch.test.mjs` + `tests/process.test.mjs`）。
+- **auth key 不发错 endpoint**：base-url 路由 key 与 auth key 一并桥接，杜绝自建网关 key
+  被发往 Google 官方 endpoint。
+
+### Stats
+
+- 16 files changed since 1.2.0（`git diff --stat HEAD` 实测：15 files, +928 / -116，另新增
+  `tests/gemini-batch.test.mjs` 225 行）——gemini-batch 大改（prompt-file / approval-mode /
+  buildCliArgs / __testing）+ process.mjs win32-safe spawn（`spawnSafe` 导出，三处
+  `shell:true` 根治）+ acp-client/acp-broker spawn 收编 + env allowlist + rescue agent 路由
+  + README/CHANGELOG 文档同步。
+- Test suite: `node --test tests/*.test.mjs` 221 / 221 passing on Windows（含
+  `tests/gemini-batch.test.mjs` 19 新用例：approval 矩阵 / C8 / C9 / prompt-file /
+  stream buf cap / win32 注入回归）。
+
 ## [1.2.0] - 2026-06-04
 
 ### Added

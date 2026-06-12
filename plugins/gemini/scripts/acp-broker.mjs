@@ -29,7 +29,7 @@ import { buildGeminiAcpArgs } from "./lib/acp-args.mjs";
 import { applyHomeGeminiAuthEnv } from "./lib/gemini-env.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 import { listenOnRestrictedUnixSocket } from "./lib/socket-permissions.mjs";
-import { spawn } from "node:child_process";
+import { spawnSafe } from "./lib/process.mjs";
 import readline from "node:readline";
 
 const SHUTDOWN_GRACE_MS = 500;
@@ -124,11 +124,14 @@ function cancelIdleTimer() {
 }
 
 function spawnAcpProcess(cwd) {
-  const child = spawn("gemini", buildGeminiAcpArgs(process.env), {
+  // spawnSafe: PATHEXT-resolved .cmd wrap with every arg cmdEscapeArg-quoted —
+  // never `shell: true`. The allowlist arg is derived from
+  // GEMINI_COMPANION_ACP_ALLOWED_MCP_SERVERS (env-controlled), so it must go
+  // through the same escaping as caller-supplied argv.
+  const child = spawnSafe("gemini", buildGeminiAcpArgs(process.env), {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
-    shell: process.platform === "win32",
     windowsHide: true
   });
 
